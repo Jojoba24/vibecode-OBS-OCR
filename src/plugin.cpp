@@ -51,11 +51,12 @@ struct NumCfg {
 	bool show_roi = true;
 	int avg_frames = 4;
 	int upscale = 3;
-	int smooth = 2;
+	int smooth = 4;
 	int thr_mode = 1; // 0 = manual, 1 = otsu
 	int thr = 170;
 	bool text_bright = true;
 	int morph = 1;
+	int pad_int = 3; // zero-pad the part before the dot (Tesseract tends to drop one leading zero)
 	int min_conf = 0; // Tesseract confidence is unreliable on tiny pixel fonts; regex + confirm do the filtering
 	int confirm = 2;
 	int interval_ms = 100;
@@ -66,7 +67,7 @@ struct NumCfg {
 
 struct StrCfg {
 	std::string prefix = "CUE";
-	std::string pattern = "[0-9]{3}\\.[0-9]{3}";
+	std::string pattern = "[0-9]{1,3}\\.[0-9]{3}";
 	std::string tessdata;
 	std::string lang = "eng";
 	std::string dump_path = "/tmp/obs-cue-roi.pgm";
@@ -458,7 +459,11 @@ static void worker_main(CueFilter *f)
 			if (inited)
 				api.End();
 			const char *dp = sc.tessdata.empty() ? nullptr : sc.tessdata.c_str();
-			if (api.Init(dp, sc.lang.c_str(), tesseract::OEM_LSTM_ONLY) != 0) {
+			// Dictionary switches only take effect when passed to Init(), not via SetVariable() afterwards.
+			std::vector<std::string> var_names = {"load_system_dawg", "load_freq_dawg", "debug_file"};
+			std::vector<std::string> var_values = {"0", "0", "/dev/null"};
+			if (api.Init(dp, sc.lang.c_str(), tesseract::OEM_LSTM_ONLY, nullptr, 0, &var_names, &var_values,
+				     false) != 0) {
 				inited = false;
 				std::lock_guard<std::mutex> l(f->cfg_mtx);
 				f->status = "Tesseract init failed (is tesseract-ocr-" + sc.lang + " installed?)";
@@ -466,9 +471,6 @@ static void worker_main(CueFilter *f)
 				continue;
 			}
 			api.SetPageSegMode(tesseract::PSM_SINGLE_LINE);
-			api.SetVariable("load_system_dawg", "0");
-			api.SetVariable("load_freq_dawg", "0");
-			api.SetVariable("debug_file", "/dev/null");
 			inited = true;
 			cur_lang = sc.lang;
 			cur_path = sc.tessdata;
@@ -511,8 +513,13 @@ static void worker_main(CueFilter *f)
 			status = "invalid regex: " + sc.pattern;
 		} else {
 			std::smatch m;
-			if (std::regex_search(norm, m, re))
-				result = sc.prefix + m.str(0);
+			if (std::regex_search(norm, m, re)) {
+				std::string body = m.str(0);
+				size_t dot = body.find('.');
+				if (nc.pad_int > 0 && dot != std::string::npos && dot < (size_t)nc.pad_int)
+					body.insert(0, (size_t)nc.pad_int - dot, '0');
+				result = sc.prefix + body;
+			}
 		}
 
 		if (!result.empty() && conf >= nc.min_conf) {
@@ -653,6 +660,7 @@ static void cf_update(void *data, obs_data_t *s)
 	n.thr = (int)obs_data_get_int(s, "thr");
 	n.text_bright = obs_data_get_bool(s, "text_bright");
 	n.morph = (int)obs_data_get_int(s, "morph");
+	n.pad_int = (int)obs_data_get_int(s, "pad_int");
 	n.min_conf = (int)obs_data_get_int(s, "min_conf");
 	n.confirm = (int)obs_data_get_int(s, "confirm");
 	n.interval_ms = (int)obs_data_get_int(s, "interval_ms");
@@ -709,6 +717,7 @@ static void cf_defaults(obs_data_t *s)
 	obs_data_set_default_int(s, "thr", n.thr);
 	obs_data_set_default_bool(s, "text_bright", n.text_bright);
 	obs_data_set_default_int(s, "morph", n.morph);
+	obs_data_set_default_int(s, "pad_int", n.pad_int);
 	obs_data_set_default_int(s, "min_conf", n.min_conf);
 	obs_data_set_default_int(s, "confirm", n.confirm);
 	obs_data_set_default_int(s, "interval_ms", n.interval_ms);
@@ -773,6 +782,7 @@ static obs_properties_t *cf_properties(void *data)
 	obs_properties_t *rec = obs_properties_create();
 	obs_properties_add_text(rec, "prefix", "Prefix (fixed text)", OBS_TEXT_DEFAULT);
 	obs_properties_add_text(rec, "pattern", "Regex for the rest (after prefix)", OBS_TEXT_DEFAULT);
+	obs_properties_add_int_slider(rec, "pad_int", "Zero-pad digits before the dot to N (0 = off)", 0, 6, 1);
 	obs_properties_add_int_slider(rec, "min_conf", "Minimum OCR confidence", 0, 100, 1);
 	obs_properties_add_int_slider(rec, "confirm", "Identical reads required", 1, 10, 1);
 	obs_properties_add_int_slider(rec, "interval_ms", "Pause between OCR runs (ms)", 0, 2000, 10);
