@@ -1,0 +1,5 @@
+build/
+*.so
+*.pgm
+.cache/
+compile_commands.json
